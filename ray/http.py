@@ -1,5 +1,6 @@
 import asyncio
 import json
+from urllib.parse import quote
 
 import aiohttp
 
@@ -18,13 +19,13 @@ _TOKEN_URL    = _PROD_03 + '/account/api/oauth/token'
 _EXCHANGE_URL = _PROD_03 + '/account/api/oauth/exchange'
 _ACCOUNT_URL  = _PROD_03 + '/account/api/public/account?accountId={account_id}'
 
-_PLAYER_URL   = _PROD_06_PERSONA + '/persona/api/public/account/lookup?q={}'
-_STATUS_URL   = _PROD_06_LIGHTSWITCH + 'lightswitch/api/service/bulk/status?serviceId=Fortnite'
-_FRIENDS_URL  = _PROD_06_FRIENDS + '/friends/api/public/friends/{}'
+_PLAYER_URL   = _PROD_06_PERSONA + '/persona/api/public/account/lookup?q={username}'
+_STATUS_URL   = _PROD_06_LIGHTSWITCH + '/lightswitch/api/service/bulk/status?serviceId=Fortnite'
+_FRIENDS_URL  = _PROD_06_FRIENDS + '/friends/api/public/friends/{account_id}'
 
 _NEWS_URL     = _PROD_07 + '/content/api/pages/fortnite-game'
 
-_BR_URL       = _PROD_11 + '/fortnite/api/stats/accountId/{account_id}/bulk/window/alltime'
+_BR_URL       = _PROD_11 + '/fortnite/api/stats/accountId/{account_id}/bulk/window/{timeframe}'
 _STORE_URL    = _PROD_11 + '/fortnite/api/storefront/v2/catalog?rvn={}'
 _LDRBRD_URL   = _PROD_11 + '/fortnite/api/leaderboards/type/global/stat/br_placetop1_{}_m0{}/window/weekly'
 
@@ -33,6 +34,11 @@ _BLOG_URL     = _EPIC_GAMES + '/fortnite/{}/news/{}'
 
 
 class HTTPClient:
+    __slots__ = ('_loop', '_session', '_username', '_password', '_auth_locked', '_access_token', '_refresh_token', '_access_expires_in', '_refresh_expires_in', '_account_id')
+
+    launcher_token = _CLIENT_LAUNCHER_TOKEN
+    fortnite_token = _FORTNITE_CLIENT_TOKEN
+
     def __init__(self, email_account, password, loop=None):
         self._loop = loop = loop or asyncio.get_event_loop()
         self._session = aiohttp.ClientSession(loop=loop)
@@ -40,23 +46,42 @@ class HTTPClient:
         self._username = email_account
         self._password = password
 
-        self.launcher_token = _CLIENT_LAUNCHER_TOKEN
-        self.fortnite_token = _FORTNITE_CLIENT_TOKEN
+        # Lock to prevent recursive call inside HTTPClient._authenticate
+        self._auth_locked = False
 
         self._access_token = None
         self._refresh_token = None
-
         self._access_expires_in = None
         self._refresh_expires_in = None
+        self._account_id = None
+
+    def __del__(self):
+        self.__close()
+
+    def __close(self):
+        session = self._session
+        if not session.closed:
+            if session._connector_owner:
+                session._connector.close()
+        session._connector = None
 
     @property
     def session(self):
         return self._session
 
+    @property
+    def account_id(self):
+        return self._account_id
+
+    @property
+    def headers(self):
+        return {'Authorization': 'bearer %s' % self._access_token}
+
     async def _authenticate(self):
+        # prevent recursive call.
+        self._auth_locked = True
 
-        # Initialize headers and data fields.
-
+        # Initialize header and data fields.
         headers = {
             'Authorization': 'basic %s' % self.launcher_token
         }
@@ -88,17 +113,74 @@ class HTTPClient:
 
         resp = await self.request('POST', _TOKEN_URL, headers=headers, data=data)
 
+        # populate our access_token, refresh_token and expiry data
         self._access_token = resp['access_token']
         self._refresh_token = resp['refresh_token']
 
         self._access_expires_in = resp['expires_in']
         self._refresh_expires_in = resp['refresh_expires']
 
+        self._account_id = resp['account_id']
+
+        # release lock
+        self._auth_locked = False
+
     async def request(self, method, url, **kwargs):
         '''Performs a HTTP request, returns the response data'''
 
-        if self._access_token is None:
+        if self._access_token is None and not self._auth_locked:
             await self._authenticate()
+
+        if 'headers' not in kwargs:
+            kwargs['headers'] = self.headers
 
         async with self._session.request(method, url, **kwargs) as resp:
             return await resp.json()
+
+    # Authless methods
+
+    def get_server_status(self):
+        async def _inner():
+            return await (await self._session.request('GET', _STATUS_URL)).json()
+        return _inner()
+
+    # Contextual methods
+
+    def get_me(self):
+        return self.get_user_from_id(self._account_id)
+
+    def get_friends(self):
+        return self.get_player_friends(self._account_id)
+
+    # General methods
+
+    def get_player(self, username):
+        return self.request('GET', _PLAYER_URL.format(username=quote(username)))
+
+    def get_player_friends(self, account_id):
+        return self.request('GET', _FRIENDS_URL.format(account_id=account_id))
+
+    def get_battle_royale_stats(self, account_id=None, timeframe='alltime'):
+        account_id = account_id or self.account_id
+        return self.request('GET', _BR_URL.format(account_id=account_id, timeframe=timeframe))
+
+    def get_users_from_ids(self, *account_ids):
+        async def _inner():
+            data = self.request('GET', _ACCOUNT_URL.format(account_id='&accountId='.join(account_ids)))
+
+            if not isinstance(data, list):
+                data = list(data)
+
+            return data
+
+        return _inner()
+
+    def get_user_from_id(self, account_id):
+        async def _inner():
+            data = await self.request('GET', _ACCOUNT_URL.format(account_id=account_id))
+
+            if isinstance(data, list):
+                return data[0]
+            return data
+
+        return _inner()
