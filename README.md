@@ -2,6 +2,8 @@
 
 ![ray_img](ray.webp)
 
+> No longer maintained
+
 A lightweight Fortnite API Library.
 
 ```py
