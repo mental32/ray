@@ -1,6 +1,6 @@
 # ray
 
-![ray_img](https://d1u5p3l4wpay3k.cloudfront.net/fortnite_gamepedia/thumb/3/34/Ray.png/250px-Ray.png?version=cd97e8d21d8d45e3c5daff6126b90efb)
+![ray_img](ray.webp)
 
 A lightweight Fortnite API Library.
 
